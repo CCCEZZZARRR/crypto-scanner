@@ -88,22 +88,52 @@ async def is_transfer_available(ex_buy, ex_sell, ex_buy_name, ex_sell_name, coin
     """
     curr_buy = await fetch_currencies_with_cache(ex_buy_name, ex_buy)
     curr_sell = await fetch_currencies_with_cache(ex_sell_name, ex_sell)
+async def is_transfer_available(ex_buy, ex_sell, ex_buy_name, ex_sell_name, coin):
+    """
+    Углубленная проверка сетей:
+    Проверяет статусы внутри массива 'networks' / 'chains'
+    """
+    curr_buy = await fetch_currencies_with_cache(ex_buy_name, ex_buy)
+    curr_sell = await fetch_currencies_with_cache(ex_sell_name, ex_sell)
 
-    # Проверка вывода
+    # 1. ПРОВЕРКА ВЫВОДА (ex_buy)
     if curr_buy and coin in curr_buy:
-        can_withdraw = curr_buy[coin].get('withdraw', True)
-        if not can_withdraw:
-            print(f"⛔ [{ex_buy_name.upper()}] Вывод для {coin} приостановлен!")
-            return False
+        coin_info = curr_buy[coin]
+        networks = coin_info.get('networks', {}) or coin_info.get('chains', {})
+        
+        # Проверяем, открыт ли вывод хотя бы в одной сети
+        if isinstance(networks, dict) and networks:
+            has_active_withdraw_net = any(
+                net.get('withdraw', False) for net in networks.values()
+            )
+            if not has_active_withdraw_net:
+                print(f"⛔ [{ex_buy_name.upper()}] Вывод {coin} закрыт во ВСЕХ сетях.")
+                return False
+        else:
+            if not coin_info.get('withdraw', True):
+                print(f"⛔ [{ex_buy_name.upper()}] Вывод {coin} приостановлен.")
+                return False
 
-    # Проверка ввода
+    # 2. ПРОВЕРКА ВВОДА (ex_sell)
     if curr_sell and coin in curr_sell:
-        can_deposit = curr_sell[coin].get('deposit', True)
-        if not can_deposit:
-            print(f"⛔ [{ex_sell_name.upper()}] Ввод для {coin} приостановлен!")
-            return False
+        coin_info = curr_sell[coin]
+        networks = coin_info.get('networks', {}) or coin_info.get('chains', {})
+        
+        # Проверяем, открыт ли ввод хотя бы в одной сети
+        if isinstance(networks, dict) and networks:
+            has_active_deposit_net = any(
+                net.get('deposit', False) for net in networks.values()
+            )
+            if not has_active_deposit_net:
+                print(f"⛔ [{ex_sell_name.upper()}] Ввод {coin} закрыт во ВСЕХ сетях.")
+                return False
+        else:
+            if not coin_info.get('deposit', True):
+                print(f"⛔ [{ex_sell_name.upper()}] Ввод {coin} приостановлен.")
+                return False
 
     return True
+
 
 # ==========================================
 # 4. ОСНОВНОЙ ЦИКЛ СКАНИРОВАНИЯ
