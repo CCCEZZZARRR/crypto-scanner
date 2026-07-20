@@ -15,7 +15,7 @@ TELEGRAM_CHAT_ID = "437658160"          # Замените на ваш chat_id
 MIN_SPREAD = 1.5      # Минимальный спред (%)
 MAX_SPREAD = 20.0     # Максимальный спред (защита от аномалий)
 MIN_VOLUME_USD = 100 # Минимальная ликвидность в стакане ($)
-COOLDOWN_SECONDS = 3600 # Таймаут повтора по одной монете (1 час = 3600 сек)
+COOLDOWN_SECONDS = 3600 # Пауза повтора по одной монете в секундах (1 час)
 
 # Память бота для отслеживания отправленных сигналов { 'BTC': timestamp }
 sent_signals = {}
@@ -27,7 +27,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Bot is running with Liquidity & Anti-Spam Protection!"
+    return "Bot is running!"
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
@@ -70,7 +70,7 @@ async def scan_market():
         'kucoin': ccxt.kucoin({'enableRateLimit': True})
     }
 
-    send_telegram("🚀 <b>PRO-Сканер запущен!</b>\n✅ Защита от спама (повтор 1 раз в час)\n✅ Фильтр ликвидности (от $100)")
+    send_telegram("🚀 <b>Сканер обновился и запущен!</b>")
 
     while True:
         try:
@@ -99,7 +99,7 @@ async def scan_market():
             for symbol in usdt_pairs:
                 coin = symbol.split('/')[0]
 
-                # 🛑 ПРОВЕРКА ТАЙМАУТА: Если по этой монете уже был сигнал менее 1 часа назад — пропускаем
+                # Защита от спама: если сигнал по монете был менее 1 часа назад — пропускаем в тихом режиме
                 if coin in sent_signals:
                     if current_time - sent_signals[coin] < COOLDOWN_SECONDS:
                         continue
@@ -134,17 +134,19 @@ async def scan_market():
                     if not (has_buy_depth and has_sell_depth):
                         continue
 
-                    # Запоминаем время отправки сигнала для этой монеты
+                    # Фиксируем время отправки сигнала для монеты
                     sent_signals[coin] = current_time
 
-                    # Формируем и отправляем сигнал
+                    # Формируем красивое и полезное сообщение
                     msg = (
                         f"⚡ <b>АРБИТРАЖНАЯ СВЯЗКА: {coin}</b>\n\n"
                         f"🟢 <b>Купить:</b> {min_buy_ex.upper()} по ${buy_price:.4f}\n"
                         f"🔴 <b>Продать:</b> {max_sell_ex.upper()} по ${sell_price:.4f}\n\n"
                         f"📈 <b>Спред:</b> <code>+{raw_spread:.2f}%</code>\n"
-                        f"💧 <b>Ликвидность:</b> >${MIN_VOLUME_USD} в стакане ✅\n"
-                        f"⏳ <i>Повторное уведомление по {coin} заблокировано на 1 час.</i>"
+                        f"💧 <b>Ликвидность:</b> >${MIN_VOLUME_USD} в стакане ✅\n\n"
+                        f"📌 <b>Перед сделкой обязательно проверьте:</b>\n"
+                        f"1. Доступность сети (Deposit / Withdraw Enabled)\n"
+                        f"2. Комиссию сети за вывод {coin}"
                     )
                     
                     send_telegram(msg)
@@ -153,7 +155,7 @@ async def scan_market():
         except Exception as e:
             print(f"Ошибка в цикле сканера: {e}")
 
-        await asyncio.sleep(20) # Пауза между кругами сканирования
+        await asyncio.sleep(20)
 
 # ==========================================
 # 5. ТОЧКА ВХОДА
@@ -161,5 +163,3 @@ async def scan_market():
 if __name__ == '__main__':
     threading.Thread(target=run_flask, daemon=True).start()
     asyncio.run(scan_market())
-
-
