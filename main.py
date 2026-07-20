@@ -9,8 +9,8 @@ import requests
 # ==========================================
 # 1. НАСТРОЙКИ БОТА И ФИЛЬТРОВ
 # ==========================================
-TELEGRAM_BOT_TOKEN = "8537437427:AAEA-z-ThXKsUiJuWSETIvPJojctgKVGbjw"      # Замените на ваш токен
-TELEGRAM_CHAT_ID = "437658160"          # Замените на ваш chat_id
+TELEGRAM_BOT_TOKEN = "8537437427:AAEA-z-ThXKsUiJuWSETIvPJojctgKVGbjw"      # Токен
+TELEGRAM_CHAT_ID = "437658160"          # Chat ID
 
 MIN_SPREAD = 1.5      # Минимальный спред (%)
 MAX_SPREAD = 20.0     # Максимальный спред (защита от аномалий)
@@ -19,6 +19,10 @@ COOLDOWN_SECONDS = 3600 # Пауза повтора по одной монете
 
 # Память бота для отслеживания отправленных сигналов { 'BTC': timestamp }
 sent_signals = {}
+
+# Кеш статусов валют, чтобы не запрашивать fetch_currencies слишком часто
+currencies_cache = {}
+CACHE_TTL = 300  # Обновлять статус кошельков раз в 5 минут (300 секунд)
 
 # ==========================================
 # 2. ВЕБ-СЕРВЕР ДЛЯ RENDER (Health Check)
@@ -60,6 +64,47 @@ async def get_depth_volume(exchange, symbol, side, target_usd):
     except Exception:
         return False
 
+async def fetch_currencies_with_cache(ex_name, exchange):
+    """Получение информации о валютах с кешированием на 5 минут"""
+    now = time.time()
+    if ex_name in currencies_cache:
+        cached_time, data = currencies_cache[ex_name]
+        if now - cached_time < CACHE_TTL:
+            return data
+
+    try:
+        data = await exchange.fetch_currencies()
+        currencies_cache[ex_name] = (now, data)
+        return data
+    except Exception as e:
+        print(f"⚠️ Не удалось загрузить статусы кошельков для {ex_name}: {e}")
+        return None
+
+async def is_transfer_available(ex_buy, ex_sell, ex_buy_name, ex_sell_name, coin):
+    """
+    Проверяет:
+    1. Открыт ли ВЫВОД (withdraw) на бирже покупки (ex_buy)
+    2. Открыт ли ВВОД (deposit) на бирже продажи (ex_sell)
+    """
+    curr_buy = await fetch_currencies_with_cache(ex_buy_name, ex_buy)
+    curr_sell = await fetch_currencies_with_cache(ex_sell_name, ex_sell)
+
+    # Проверка вывода
+    if curr_buy and coin in curr_buy:
+        can_withdraw = curr_buy[coin].get('withdraw', True)
+        if not can_withdraw:
+            print(f"⛔ [{ex_buy_name.upper()}] Вывод для {coin} приостановлен!")
+            return False
+
+    # Проверка ввода
+    if curr_sell and coin in curr_sell:
+        can_deposit = curr_sell[coin].get('deposit', True)
+        if not can_deposit:
+            print(f"⛔ [{ex_sell_name.upper()}] Ввод для {coin} приостановлен!")
+            return False
+
+    return True
+
 # ==========================================
 # 4. ОСНОВНОЙ ЦИКЛ СКАНИРОВАНИЯ
 # ==========================================
@@ -70,7 +115,7 @@ async def scan_market():
         'kucoin': ccxt.kucoin({'enableRateLimit': True})
     }
 
-    send_telegram("🚀 <b>Сканер обновился и запущен!</b>")
+    send_telegram("🚀 <b>Сканер обновился! Добавлена автоматическая проверка ввода/вывода кошельков.</b>")
 
     while True:
         try:
@@ -99,7 +144,7 @@ async def scan_market():
             for symbol in usdt_pairs:
                 coin = symbol.split('/')[0]
 
-                # Защита от спама: если сигнал по монете был менее 1 часа назад — пропускаем в тихом режиме
+                # Защита от спама: если сигнал по монете был менее 1 часа назад — пропускаем
                 if coin in sent_signals:
                     if current_time - sent_signals[coin] < COOLDOWN_SECONDS:
                         continue
@@ -127,26 +172,39 @@ async def scan_market():
 
                 if MIN_SPREAD <= raw_spread <= MAX_SPREAD:
                     
-                    # ПРОВЕРКА ЛИКВИДНОСТИ (Объём от $100)
+                    # 1️⃣ ПРОВЕРКА ЛИКВИДНОСТИ (Объём от $100)
                     has_buy_depth = await get_depth_volume(exchanges[min_buy_ex], symbol, 'buy', MIN_VOLUME_USD)
                     has_sell_depth = await get_depth_volume(exchanges[max_sell_ex], symbol, 'sell', MIN_VOLUME_USD)
 
                     if not (has_buy_depth and has_sell_depth):
                         continue
 
+                    # 2️⃣ ПРОВЕРКА ВВОДА И ВЫВОДА КОШЕЛЬКОВ
+                    transfer_ok = await is_transfer_available(
+                        exchanges[min_buy_ex], 
+                        exchanges[max_sell_ex], 
+                        min_buy_ex, 
+                        max_sell_ex, 
+                        coin
+                    )
+
+                    if not transfer_ok:
+                        print(f"⏩ Пропущена фантомная связка {coin} (проблемы с кошельком).")
+                        continue
+
                     # Фиксируем время отправки сигнала для монеты
                     sent_signals[coin] = current_time
 
-                    # Формируем красивое и полезное сообщение
+                    # Формируем сообщение
                     msg = (
                         f"⚡ <b>АРБИТРАЖНАЯ СВЯЗКА: {coin}</b>\n\n"
                         f"🟢 <b>Купить:</b> {min_buy_ex.upper()} по ${buy_price:.4f}\n"
                         f"🔴 <b>Продать:</b> {max_sell_ex.upper()} по ${sell_price:.4f}\n\n"
                         f"📈 <b>Спред:</b> <code>+{raw_spread:.2f}%</code>\n"
-                        f"💧 <b>Ликвидность:</b> >${MIN_VOLUME_USD} в стакане ✅\n\n"
-                        f"📌 <b>Перед сделкой обязательно проверьте:</b>\n"
-                        f"1. Доступность сети (Deposit / Withdraw Enabled)\n"
-                        f"2. Комиссию сети за вывод {coin}"
+                        f"💧 <b>Ликвидность:</b> >${MIN_VOLUME_USD} ✅\n"
+                        f"🌐 <b>Сеть (Deposit/Withdraw):</b> Доступна ✅\n\n"
+                        f"📌 <b>Перед сделкой проверьте:</b>\n"
+                        f"Комиссию сети за вывод {coin}"
                     )
                     
                     send_telegram(msg)
@@ -163,3 +221,4 @@ async def scan_market():
 if __name__ == '__main__':
     threading.Thread(target=run_flask, daemon=True).start()
     asyncio.run(scan_market())
+
