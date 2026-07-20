@@ -10,11 +10,15 @@ import requests
 # 1. НАСТРОЙКИ БОТА И ФИЛЬТРОВ
 # ==========================================
 TELEGRAM_BOT_TOKEN = "8537437427:AAEA-z-ThXKsUiJuWSETIvPJojctgKVGbjw"      # Замените на ваш токен
-TELEGRAM_CHAT_ID = "437658160"         
+TELEGRAM_CHAT_ID = "437658160"          # Замените на ваш chat_id
 
 MIN_SPREAD = 1.5      # Минимальный спред (%)
 MAX_SPREAD = 20.0     # Максимальный спред (защита от аномалий)
 MIN_VOLUME_USD = 100 # Минимальная ликвидность в стакане ($)
+COOLDOWN_SECONDS = 3600 # Таймаут повтора по одной монете (1 час = 3600 сек)
+
+# Память бота для отслеживания отправленных сигналов { 'BTC': timestamp }
+sent_signals = {}
 
 # ==========================================
 # 2. ВЕБ-СЕРВЕР ДЛЯ RENDER (Health Check)
@@ -23,7 +27,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Bot is running with Liquidity & Network checks!"
+    return "Bot is running with Liquidity & Anti-Spam Protection!"
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
@@ -42,10 +46,7 @@ def send_telegram(text):
         print(f"Ошибка отправки в TG: {e}")
 
 async def get_depth_volume(exchange, symbol, side, target_usd):
-    """
-    Проверка объёма в стакане (Orderbook).
-    Возвращает True, если в стакане есть ликвидность на target_usd.
-    """
+    """Проверка объёма в стакане (Orderbook)"""
     try:
         orderbook = await exchange.fetch_order_book(symbol, limit=20)
         orders = orderbook['asks'] if side == 'buy' else orderbook['bids']
@@ -69,10 +70,12 @@ async def scan_market():
         'kucoin': ccxt.kucoin({'enableRateLimit': True})
     }
 
-    send_telegram("🚀 <b>PRO-Сканер запущен!</b>\nВключены проверки:\n✅ Ликвидность (от $100)\n✅ Статусы ввода/вывода\n✅ Сетевые комиссии")
+    send_telegram("🚀 <b>PRO-Сканер запущен!</b>\n✅ Защита от спама (повтор 1 раз в час)\n✅ Фильтр ликвидности (от $100)")
 
     while True:
         try:
+            current_time = time.time()
+
             # Загружаем тикеры со всех бирж
             tickers = {}
             for name, ex in exchanges.items():
@@ -91,10 +94,16 @@ async def scan_market():
                 if 'mexc' in tickers:
                     common_symbols.update(set(tickers['mexc'].keys()) & set(tickers['kucoin'].keys()))
 
-            # Фильтруем только USDT спотовые пары
             usdt_pairs = [s for s in common_symbols if s.endswith('/USDT')]
 
             for symbol in usdt_pairs:
+                coin = symbol.split('/')[0]
+
+                # 🛑 ПРОВЕРКА ТАЙМАУТА: Если по этой монете уже был сигнал менее 1 часа назад — пропускаем
+                if coin in sent_signals:
+                    if current_time - sent_signals[coin] < COOLDOWN_SECONDS:
+                        continue
+
                 prices = {}
                 for ex_name in exchanges:
                     if ex_name in tickers and symbol in tickers[ex_name]:
@@ -105,7 +114,6 @@ async def scan_market():
                 if len(prices) < 2:
                     continue
 
-                # Ищем минимальную цену покупки (Ask) и максимальную продажи (Bid)
                 min_buy_ex = min(prices, key=lambda x: prices[x]['ask'])
                 max_sell_ex = max(prices, key=lambda x: prices[x]['bid'])
 
@@ -115,31 +123,32 @@ async def scan_market():
                 buy_price = prices[min_buy_ex]['ask']
                 sell_price = prices[max_sell_ex]['bid']
 
-                # Расчет спреда без учета комиссий
                 raw_spread = ((sell_price - buy_price) / buy_price) * 100
 
                 if MIN_SPREAD <= raw_spread <= MAX_SPREAD:
                     
-                    # 1. ПРОВЕРКА ЛИКВИДНОСТИ (Объём стакана от $100)
+                    # ПРОВЕРКА ЛИКВИДНОСТИ (Объём от $100)
                     has_buy_depth = await get_depth_volume(exchanges[min_buy_ex], symbol, 'buy', MIN_VOLUME_USD)
                     has_sell_depth = await get_depth_volume(exchanges[max_sell_ex], symbol, 'sell', MIN_VOLUME_USD)
 
                     if not (has_buy_depth and has_sell_depth):
-                        continue # Пропускаем, если стакан пустой
+                        continue
 
-                    # Формируем сигнал
-                    coin = symbol.split('/')[0]
+                    # Запоминаем время отправки сигнала для этой монеты
+                    sent_signals[coin] = current_time
+
+                    # Формируем и отправляем сигнал
                     msg = (
                         f"⚡ <b>АРБИТРАЖНАЯ СВЯЗКА: {coin}</b>\n\n"
                         f"🟢 <b>Купить:</b> {min_buy_ex.upper()} по ${buy_price:.4f}\n"
                         f"🔴 <b>Продать:</b> {max_sell_ex.upper()} по ${sell_price:.4f}\n\n"
                         f"📈 <b>Спред:</b> <code>+{raw_spread:.2f}%</code>\n"
                         f"💧 <b>Ликвидность:</b> >${MIN_VOLUME_USD} в стакане ✅\n"
-                        f"⚠️ <i>Проверьте статус сети {coin} перед переводом!</i>"
+                        f"⏳ <i>Повторное уведомление по {coin} заблокировано на 1 час.</i>"
                     )
                     
                     send_telegram(msg)
-                    await asyncio.sleep(5) # Задержка между сигналами
+                    await asyncio.sleep(2)
 
         except Exception as e:
             print(f"Ошибка в цикле сканера: {e}")
@@ -150,9 +159,7 @@ async def scan_market():
 # 5. ТОЧКА ВХОДА
 # ==========================================
 if __name__ == '__main__':
-    # Запускаем Flask в отдельном потоке
     threading.Thread(target=run_flask, daemon=True).start()
-    
-    # Запускаем асинхронный сканер
     asyncio.run(scan_market())
+
 
