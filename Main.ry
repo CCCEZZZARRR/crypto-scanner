@@ -1,0 +1,101 @@
+import ccxt
+import requests
+import time
+
+# --- НАСТРОЙКИ TELEGRAM ---
+TOKEN = "8537437427:AAEA-z-ThXKsUiJuWSETIvPJojctgKVGbjw"
+CHAT_ID = "437658160"
+
+def send_telegram_message(text):
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    payload = {"chat_id": CHAT_ID, "text": text}
+    try:
+        requests.post(url, json=payload, timeout=5)
+    except:
+        pass
+
+# --- ТРИ БИРЖИ ДЛЯ АНАЛИЗА ---
+exchanges = {
+    "Bitget": ccxt.bitget(),
+    "MEXC": ccxt.mexc(),
+    "KuCoin": ccxt.kucoin()
+}
+
+sent_signals = {}
+COOLDOWN_TIME = 3600  # Повторы блокируются на 1 час
+
+print("📱 Мобильный 3D-сканер запущен: Bitget | MEXC | KuCoin")
+send_telegram_message("🔍 3D-Сканер успешно запущен с телефона!")
+
+iteration = 1
+
+while True:
+    try:
+        current_time = time.time()
+        print(f"\n--- [Круг №{iteration}] Сканирование... ---")
+        
+        all_tickers = {}
+        all_pairs = {}
+        
+        for name, ex_obj in exchanges.items():
+            try:
+                all_tickers[name] = ex_obj.fetch_tickers()
+                all_pairs[name] = [p for p in all_tickers[name].keys() if p.endswith('/USDT')]
+            except:
+                all_tickers[name] = {}
+                all_pairs[name] = []
+
+        found_on_this_turn = 0
+        ex_names = list(exchanges.keys())
+        pairs_of_exchanges = [
+            (ex_names[0], ex_names[1]),  # Bitget <-> MEXC
+            (ex_names[0], ex_names[2]),  # Bitget <-> KuCoin
+            (ex_names[1], ex_names[2])   # MEXC <-> KuCoin
+        ]
+        
+        for name_A, name_B in pairs_of_exchanges:
+            common_pairs = list(set(all_pairs.get(name_A, [])) & set(all_pairs.get(name_B, [])))
+            
+            for pair in common_pairs:
+                try:
+                    t_A = all_tickers[name_A].get(pair)
+                    t_B = all_tickers[name_B].get(pair)
+                    
+                    if t_A and t_B and t_A['ask'] and t_A['bid'] and t_B['ask'] and t_B['bid']:
+                        ask_A, bid_A = t_A['ask'], t_A['bid']
+                        ask_B, bid_B = t_B['ask'], t_B['bid']
+                        
+                        commission = 0.0015 
+                        
+                        profit_A_to_B = ((bid_B * (1 - commission)) / (ask_A * (1 + commission)) - 1) * 100
+                        profit_B_to_A = ((bid_A * (1 - commission)) / (ask_B * (1 + commission)) - 1) * 100
+                        
+                        for profit, buy_ex, sell_ex, ask_p, bid_p in [
+                            (profit_A_to_B, name_A, name_B, ask_A, bid_B),
+                            (profit_B_to_A, name_B, name_A, ask_B, bid_A)
+                        ]:
+                            if 1.5 <= profit <= 20.0:
+                                signal_key = f"{pair}_{buy_ex}_{sell_ex}"
+                                
+                                if signal_key in sent_signals and (current_time - sent_signals[signal_key] < COOLDOWN_TIME):
+                                    continue
+                                
+                                msg = (f"🚨 **НАЙДЕН СПРЕД ({pair})** 🚨\n\n"
+                                       f"🟢 КУПИТЬ на {buy_ex}: {ask_p}\n"
+                                       f"🔴 ПРОДАТЬ на {sell_ex}: {bid_p}\n"
+                                       f"💰 Профит: +{profit:.2f}%\n"
+                                       f"📱 Отправлено со смартфона")
+                                
+                                send_telegram_message(msg)
+                                sent_signals[signal_key] = current_time
+                                found_on_this_turn += 1
+                except:
+                    continue
+                    
+        print(f"Круг №{iteration} завершен. Найдено: {found_on_this_turn}")
+        iteration += 1
+        
+    except Exception as e:
+        print(f"⚠️ Ошибка: {e}")
+        
+    time.sleep(20)
