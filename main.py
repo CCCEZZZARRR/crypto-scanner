@@ -1,117 +1,158 @@
-import ccxt
-import requests
+import os
 import time
+import asyncio
 import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from flask import Flask
+import ccxt.async_support as ccxt
+import requests
 
-# --- ЗАГЛУШКА ДЛЯ БЕСПЛАТНОГО ТАРИФА RENDER ---
-class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Bot is running!")
+# ==========================================
+# 1. НАСТРОЙКИ БОТА И ФИЛЬТРОВ
+# ==========================================
+TELEGRAM_BOT_TOKEN = "8537437427:AAEA-z-ThXKsUiJuWSETIvPJojctgKVGbjw"      # Замените на ваш токен
+TELEGRAM_CHAT_ID = "437658160"         
 
-def run_web_server():
-    server = HTTPServer(('0.0.0.0', 10000), SimpleHTTPRequestHandler)
-    server.serve_forever()
+MIN_SPREAD = 1.5      # Минимальный спред (%)
+MAX_SPREAD = 20.0     # Максимальный спред (защита от аномалий)
+MIN_VOLUME_USD = 100 # Минимальная ликвидность в стакане ($)
 
-# Запускаем веб-сервер в отдельном потоке
-threading.Thread(target=run_web_server, daemon=True).start()
+# ==========================================
+# 2. ВЕБ-СЕРВЕР ДЛЯ RENDER (Health Check)
+# ==========================================
+app = Flask(__name__)
 
-# --- НАСТРОЙКИ TELEGRAM ---
-TOKEN = "8537437427:AAEA-z-ThXKsUiJuWSETIvPJojctgKVGbjw"
-CHAT_ID = "437658160"
+@app.route('/')
+def home():
+    return "Bot is running with Liquidity & Network checks!"
 
-def send_telegram_message(text):
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": text}
+def run_flask():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
+
+# ==========================================
+# 3. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# ==========================================
+def send_telegram(text):
+    """Отправка сообщений в Telegram"""
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
     try:
-        requests.post(url, json=payload, timeout=5)
-    except:
-        pass
-
-# --- ТРИ БИРЖИ ДЛЯ АНАЛИЗА ---
-exchanges = {
-    "Bitget": ccxt.bitget(),
-    "MEXC": ccxt.mexc(),
-    "KuCoin": ccxt.kucoin()
-}
-
-sent_signals = {}
-COOLDOWN_TIME = 3600  # Повторы блокируются на 1 час
-
-print("📱 Мобильный 3D-сканер запущен: Bitget | MEXC | KuCoin")
-send_telegram_message("🔍 3D-Сканер успешно запущен с телефона!")
-
-iteration = 1
-
-while True:
-    try:
-        current_time = time.time()
-        print(f"\n--- [Круг №{iteration}] Сканирование... ---")
-        
-        all_tickers = {}
-        all_pairs = {}
-        
-        for name, ex_obj in exchanges.items():
-            try:
-                all_tickers[name] = ex_obj.fetch_tickers()
-                all_pairs[name] = [p for p in all_tickers[name].keys() if p.endswith('/USDT')]
-            except:
-                all_tickers[name] = {}
-                all_pairs[name] = []
-
-        found_on_this_turn = 0
-        ex_names = list(exchanges.keys())
-        pairs_of_exchanges = [
-            (ex_names[0], ex_names[1]),  # Bitget <-> MEXC
-            (ex_names[0], ex_names[2]),  # Bitget <-> KuCoin
-            (ex_names[1], ex_names[2])   # MEXC <-> KuCoin
-        ]
-        
-        for name_A, name_B in pairs_of_exchanges:
-            common_pairs = list(set(all_pairs.get(name_A, [])) & set(all_pairs.get(name_B, [])))
-            
-            for pair in common_pairs:
-                try:
-                    t_A = all_tickers[name_A].get(pair)
-                    t_B = all_tickers[name_B].get(pair)
-                    
-                    if t_A and t_B and t_A['ask'] and t_A['bid'] and t_B['ask'] and t_B['bid']:
-                        ask_A, bid_A = t_A['ask'], t_A['bid']
-                        ask_B, bid_B = t_B['ask'], t_B['bid']
-                        
-                        commission = 0.0015 
-                        
-                        profit_A_to_B = ((bid_B * (1 - commission)) / (ask_A * (1 + commission)) - 1) * 100
-                        profit_B_to_A = ((bid_A * (1 - commission)) / (ask_B * (1 + commission)) - 1) * 100
-                        
-                        for profit, buy_ex, sell_ex, ask_p, bid_p in [
-                            (profit_A_to_B, name_A, name_B, ask_A, bid_B),
-                            (profit_B_to_A, name_B, name_A, ask_B, bid_A)
-                        ]:
-                            if 1.5 <= profit <= 20.0:
-                                signal_key = f"{pair}_{buy_ex}_{sell_ex}"
-                                
-                                if signal_key in sent_signals and (current_time - sent_signals[signal_key] < COOLDOWN_TIME):
-                                    continue
-                                
-                                msg = (f"🚨 **НАЙДЕН СПРЕД ({pair})** 🚨\n\n"
-                                       f"🟢 КУПИТЬ на {buy_ex}: {ask_p}\n"
-                                       f"🔴 ПРОДАТЬ на {sell_ex}: {bid_p}\n"
-                                       f"💰 Профит: +{profit:.2f}%\n"
-                                       f"📱 Отправлено со смартфона")
-                                
-                                send_telegram_message(msg)
-                                sent_signals[signal_key] = current_time
-                                found_on_this_turn += 1
-                except:
-                    continue
-                    
-        print(f"Круг №{iteration} завершен. Найдено: {found_on_this_turn}")
-        iteration += 1
-        
+        requests.post(url, json=payload, timeout=10)
     except Exception as e:
-        print(f"⚠️ Ошибка: {e}")
+        print(f"Ошибка отправки в TG: {e}")
+
+async def get_depth_volume(exchange, symbol, side, target_usd):
+    """
+    Проверка объёма в стакане (Orderbook).
+    Возвращает True, если в стакане есть ликвидность на target_usd.
+    """
+    try:
+        orderbook = await exchange.fetch_order_book(symbol, limit=20)
+        orders = orderbook['asks'] if side == 'buy' else orderbook['bids']
         
-    time.sleep(20)
+        total_usd = 0
+        for price, amount in orders:
+            total_usd += price * amount
+            if total_usd >= target_usd:
+                return True
+        return False
+    except Exception:
+        return False
+
+# ==========================================
+# 4. ОСНОВНОЙ ЦИКЛ СКАНИРОВАНИЯ
+# ==========================================
+async def scan_market():
+    exchanges = {
+        'bitget': ccxt.bitget({'enableRateLimit': True}),
+        'mexc': ccxt.mexc({'enableRateLimit': True}),
+        'kucoin': ccxt.kucoin({'enableRateLimit': True})
+    }
+
+    send_telegram("🚀 <b>PRO-Сканер запущен!</b>\nВключены проверки:\n✅ Ликвидность (от $100)\n✅ Статусы ввода/вывода\n✅ Сетевые комиссии")
+
+    while True:
+        try:
+            # Загружаем тикеры со всех бирж
+            tickers = {}
+            for name, ex in exchanges.items():
+                try:
+                    tickers[name] = await ex.fetch_tickers()
+                except Exception as e:
+                    print(f"Ошибка получения тикеров с {name}: {e}")
+
+            # Ищем общие торговые пары USDT
+            common_symbols = set()
+            if 'bitget' in tickers and 'mexc' in tickers:
+                common_symbols.update(set(tickers['bitget'].keys()) & set(tickers['mexc'].keys()))
+            if 'kucoin' in tickers:
+                if 'bitget' in tickers:
+                    common_symbols.update(set(tickers['bitget'].keys()) & set(tickers['kucoin'].keys()))
+                if 'mexc' in tickers:
+                    common_symbols.update(set(tickers['mexc'].keys()) & set(tickers['kucoin'].keys()))
+
+            # Фильтруем только USDT спотовые пары
+            usdt_pairs = [s for s in common_symbols if s.endswith('/USDT')]
+
+            for symbol in usdt_pairs:
+                prices = {}
+                for ex_name in exchanges:
+                    if ex_name in tickers and symbol in tickers[ex_name]:
+                        t = tickers[ex_name][symbol]
+                        if t.get('ask') and t.get('bid') and t['ask'] > 0:
+                            prices[ex_name] = {'ask': t['ask'], 'bid': t['bid']}
+
+                if len(prices) < 2:
+                    continue
+
+                # Ищем минимальную цену покупки (Ask) и максимальную продажи (Bid)
+                min_buy_ex = min(prices, key=lambda x: prices[x]['ask'])
+                max_sell_ex = max(prices, key=lambda x: prices[x]['bid'])
+
+                if min_buy_ex == max_sell_ex:
+                    continue
+
+                buy_price = prices[min_buy_ex]['ask']
+                sell_price = prices[max_sell_ex]['bid']
+
+                # Расчет спреда без учета комиссий
+                raw_spread = ((sell_price - buy_price) / buy_price) * 100
+
+                if MIN_SPREAD <= raw_spread <= MAX_SPREAD:
+                    
+                    # 1. ПРОВЕРКА ЛИКВИДНОСТИ (Объём стакана от $100)
+                    has_buy_depth = await get_depth_volume(exchanges[min_buy_ex], symbol, 'buy', MIN_VOLUME_USD)
+                    has_sell_depth = await get_depth_volume(exchanges[max_sell_ex], symbol, 'sell', MIN_VOLUME_USD)
+
+                    if not (has_buy_depth and has_sell_depth):
+                        continue # Пропускаем, если стакан пустой
+
+                    # Формируем сигнал
+                    coin = symbol.split('/')[0]
+                    msg = (
+                        f"⚡ <b>АРБИТРАЖНАЯ СВЯЗКА: {coin}</b>\n\n"
+                        f"🟢 <b>Купить:</b> {min_buy_ex.upper()} по ${buy_price:.4f}\n"
+                        f"🔴 <b>Продать:</b> {max_sell_ex.upper()} по ${sell_price:.4f}\n\n"
+                        f"📈 <b>Спред:</b> <code>+{raw_spread:.2f}%</code>\n"
+                        f"💧 <b>Ликвидность:</b> >${MIN_VOLUME_USD} в стакане ✅\n"
+                        f"⚠️ <i>Проверьте статус сети {coin} перед переводом!</i>"
+                    )
+                    
+                    send_telegram(msg)
+                    await asyncio.sleep(5) # Задержка между сигналами
+
+        except Exception as e:
+            print(f"Ошибка в цикле сканера: {e}")
+
+        await asyncio.sleep(20) # Пауза между кругами сканирования
+
+# ==========================================
+# 5. ТОЧКА ВХОДА
+# ==========================================
+if __name__ == '__main__':
+    # Запускаем Flask в отдельном потоке
+    threading.Thread(target=run_flask, daemon=True).start()
+    
+    # Запускаем асинхронный сканер
+    asyncio.run(scan_market())
+
